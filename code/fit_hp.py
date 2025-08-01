@@ -2,24 +2,31 @@ import numpy as np
 import pandas as pd
 import torch
 import os
+import sys
 import datetime as dt
 import warnings
 import time
+import seaborn as sns
 
 from weighted_LWO_estimator import wLWO_estimator_torch, wLWO_estimator_torch2
 from GIS_ewma import GIS_ewma_torch, GIS_ewma_prec_torch
 from QIS_ewma import QIS_ewma_torch, QIS_ewma_prec_torch
 from LIS_ewma import LIS_ewma_torch, LIS_ewma_prec_torch
 from ANS_ewma import analytical_shrinkage_ewma_torch, analytical_shrinkage_prec_ewma_torch
+sys.path.insert(0, './WeSpeR/code/WeSpeR_LD')
+from WeSpeR.code.WeSpeR_LD import WeSpeR_LD
+from WeSpeR.code.nl_formulas import nl_prec_shrinkage
+# from WeSpeR_LD import WeSpeR_LD
 
 from markowitz import GMV_P_torch, GMV_torch
 from dataloader import get_domain_list, close_SP500
 import matplotlib.pyplot as plt
 
 class EWMA_model(torch.nn.Module):
-    def __init__(self, a = 1., lag = 24, estimator = 'S'):
+    def __init__(self, a = 1., q = 0.05, lag = 24, estimator = 'S'):
         super().__init__()
         self.a = torch.nn.Parameter(a*torch.ones(1).type(torch.float64))
+        self.q = torch.nn.Parameter(q*torch.ones(1).type(torch.float64))
         self.lag = lag
         self.estimator = estimator
     
@@ -29,6 +36,9 @@ class EWMA_model(torch.nn.Module):
         res_e = torch.zeros(Y.shape[0]//20-self.lag, dtype=Y.dtype)
         for i in range(self.lag, Y.shape[0]//20):
             Y_train = Y[max(0, (i-self.lag)*20):i*20]
+            y_min = torch.quantile(Y_train, self.q, dim=0)
+            y_max = torch.quantile(Y_train, 1-self.q, dim=0)
+            Y_train = torch.max(torch.min(Y_train, y_max), y_min)
             Y_test = Y[i*20:(i+1)*20]
 
             alpha = -torch.log(self.a)*Y_train.shape[0]
@@ -70,9 +80,19 @@ class EWMA_model(torch.nn.Module):
                     P = LIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
                     Sigma = LIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+            if self.estimator == 'WeSpeR':
+                S = Y_train_ewma.T @ (w[:,None]*Y_train_ewma)/Y_train_ewma.shape[0]/(1-(w**2/Y_train_ewma.shape[0]**2).sum(axis=0))
+                lambda_, U = torch.linalg.eigh(S)
+                est = WeSpeR_LD(bias=True, assume_centered=True)
+                est = est.fit_torch(Y_train_ewma.detach(), w.detach(), y=None, tau_init = None, method = "Adam", n_epochs = 30, b = 1, assume_centered = True, lr = 5e-2, momentum=0., verbose = True)
+                # P = est.get_precision(d=None, wd=None,weights='ewma', w_args=[alpha])
+                t_lambda = nl_prec_shrinkage(lambda_.detach(), est.tau_fit_.detach(), torch.ones(est.tau_fit_.shape[0])/est.tau_fit_.shape[0], None, None, c = est.c, weights = 'ewma', w_args = [alpha.detach()], method = 'root', verbose = False).real.to(torch.float64)
+                P = U @ torch.diag(t_lambda) @ U.T
+        
                 
             if P is None:
-                e, s, IC = GMV_torch(Y_test, Sigma, wb=torch.ones(p)/p)
+                P = torch.linalg.pinv(Sigma)
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p)/p)
             else:
                 e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p)/p)
             res_s[i-self.lag] = s
@@ -163,13 +183,14 @@ class EWMA_model2(torch.nn.Module):
         return self.b
      
 
-def minimization(Y, a = 1., lag = 24, n_epochs = 10, lr  = 1e-2, estimator = 'S', verbose = True):
-    model = EWMA_model(a = a, lag = lag, estimator = estimator)
+def minimization(Y, a = 1., q = 0.05, lag = 24, n_epochs = 10, lr  = 1e-2, estimator = 'S', verbose = True):
+    model = EWMA_model(a = a, q = q, lag = lag, estimator = estimator)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     running_loss = []
     best_loss = np.inf
     best_a = a*torch.ones(1).type(torch.float64)
+    best_q = 0.05*torch.ones(1).type(torch.float64)
 
     model.train(True)
     for i in range(n_epochs):
@@ -182,6 +203,7 @@ def minimization(Y, a = 1., lag = 24, n_epochs = 10, lr  = 1e-2, estimator = 'S'
         if loss.item() < best_loss:
             best_loss = loss.item()
             best_a = model.get_a().detach()
+            best_q = model.q.detach()
 
         running_loss += [loss.item()]
 
@@ -191,7 +213,7 @@ def minimization(Y, a = 1., lag = 24, n_epochs = 10, lr  = 1e-2, estimator = 'S'
     if verbose:
         print("Final loss:", best_loss)
 
-    return model, best_a, np.array(running_loss)
+    return model, best_a, best_q, np.array(running_loss)
 
 def minimization2(Y, a = 1., b = 1., lag = 24, n_epochs = 10, lr  = 1e-2, estimator = 'S', verbose = True):
     model = EWMA_model2(a = a, b = b, lag = lag, estimator = estimator)
@@ -233,6 +255,7 @@ def plot_vol(Y, a_tab, lag = 24, estimator_list = ['LWO']):
         sharpe_tab += [[]]
         for a in a_tab:
             model = EWMA_model(a = a, lag = lag, estimator = estimator)
+            model.eval()
             vol, mu, sharpe = model(Y)
             vol_tab[-1] += [vol.detach().item()]
             sharpe_tab[-1] += [sharpe.detach().item()]
@@ -258,10 +281,72 @@ def plot_vol(Y, a_tab, lag = 24, estimator_list = ['LWO']):
     plt.show()
 
     return 
+
+def plot_spectrum(Y, a = 0.99, lag=48, estimator = 'S'):
+    eigenvalue_sets = []
+    for i in range(lag, Y.shape[0]//20):
+        Y_train = Y[max(0, (i-lag)*20):i*20]
+        Y_test = Y[i*20:(i+1)*20]
+
+        alpha = -torch.log(a)*Y_train.shape[0]
+        beta = alpha/(1-torch.exp(-alpha))
+        w = a**torch.fliplr(torch.ones(Y_train.shape[0]).cumsum(axis=0)[None,:]-1)[0,:]
+        w = w/w.sum(axis=0)*Y_train.shape[0]
+        wsq = torch.sqrt(w)
+        W = torch.diag(w)
+        Wsq = torch.sqrt(W)
+
+        Y_train_ewma_mean = (w[:,None]*Y_train).sum(axis=0)[None,:]/w.sum(axis=0)
+        Y_train_ewma = Y_train - Y_train_ewma_mean
+
+        P, Sigma = None, None
+        if estimator == 'S':
+            Sigma = Y_train_ewma.T @ (w[:,None]*Y_train_ewma)/Y_train_ewma.shape[0]/(1-(w**2/Y_train_ewma.shape[0]**2).sum(axis=0))
+        if estimator == 'LWO':
+            Sigma = wLWO_estimator_torch(Y_train, w/Y_train.shape[0], assume_centered = False)
+        if estimator == 'ANS':
+            try:
+                Sigma = torch.linalg.pinv(analytical_shrinkage_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True))
+            except:
+                Sigma = analytical_shrinkage_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+        if estimator == 'GIS':
+            try:
+                Sigma = torch.linalg.pinv(GIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True))
+            except:
+                Sigma = GIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+        if estimator == 'QIS':
+            try:
+                Sigma = torch.linalg.pinv(QIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True))
+            except:
+                Sigma = QIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)                
+        if estimator == 'LIS':
+            try:
+                Sigma = torch.linalg.pinv(LIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True))
+            except:
+                Sigma = LIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+        if estimator == 'WeSpeR':
+                S = Y_train_ewma.T @ (w[:,None]*Y_train_ewma)/Y_train_ewma.shape[0]/(1-(w**2/Y_train_ewma.shape[0]**2).sum(axis=0))
+                lambda_, U = torch.linalg.eigh(S)
+                est = WeSpeR_LD(bias=True, assume_centered=True)
+                est = est.fit_torch(Y_train_ewma.detach(), w.detach(), y=None, tau_init = None, method = "Adam", n_epochs = 30, b = 1, assume_centered = True, lr = 5e-2, momentum=0., verbose = True)
+                # P = est.get_precision(d=None, wd=None,weights='ewma', w_args=[alpha])
+                t_lambda = nl_prec_shrinkage(lambda_.detach(), est.tau_fit_.detach(), torch.ones(est.tau_fit_.shape[0])/est.tau_fit_.shape[0], None, None, c = est.c, weights = 'ewma', w_args = [alpha.detach()], method = 'root', verbose = False).real.to(torch.float64)
+                Sigma = U @ torch.diag(1/t_lambda) @ U.T
+        
+        lambda_ = torch.linalg.eigvalsh(Sigma)
+        eigenvalue_sets += [1/lambda_.numpy()]
     
+    sorted_eigs = np.array([np.sort(eigs) for eigs in eigenvalue_sets])
+
+    plt.figure(figsize=(10, 6))
+    sns.violinplot(data=sorted_eigs, inner='quartile')
+    plt.title('Distribution of Eigenvalues of P at Each Rank, '+estimator)
+    plt.xlabel('Eigenvalue Rank')
+    plt.ylabel('Eigenvalue')
+    plt.grid(True)
+    plt.show()
 
 if __name__ == "__main__":
-    import importlib
     import matplotlib
     try:
         matplotlib.use('tkagg')
@@ -270,7 +355,6 @@ if __name__ == "__main__":
         pass
 
     try:
-        #Y = torch.empty((500,25)).normal_()
         Y.shape
     except:
         beg_time = time.time()
@@ -287,12 +371,16 @@ if __name__ == "__main__":
         print("Data loading:", end_time - beg_time)
     
     beg_time = time.time()
-    #model, best_a, loss = minimization(Y, a = 0.99, lag = 48, n_epochs = 10, lr = 1e-3, estimator = 'ANS', verbose = True)
-    model, best_a, best_b, loss = minimization2(Y, a = 0.99, b = 0.99, lag = 48, n_epochs = 30, lr = 1e-3, estimator = 'LWO', verbose = True)
+    model, best_a, best_q, loss = minimization(Y, a = 0.99, q = 0.05, lag = 36, n_epochs = 30, lr = 2e-3, estimator = 'GIS', verbose = True)
+    # model, best_a, best_b, loss = minimization2(Y, a = 0.99, b = 0.99, lag = 48, n_epochs = 30, lr = 1e-3, estimator = 'LWO', verbose = True)
     end_time = time.time()
     print("Minimization:", end_time - beg_time)
     print("Best a =", best_a)
-    print("Best b =", best_b)
+    print("Best q =", best_q)
+    # print("Best b =", best_b)
 
-    a_tab = list(np.linspace(0.92,1.02,60))
+    a_tab = list(np.linspace(0.91,1.01,60))
     # plot_vol(Y, a_tab, lag = 48, estimator_list = ['LWO', 'S', 'GIS', 'QIS', 'ANS'])
+    # plot_vol(Y, a_tab, lag = 48, estimator_list = ['WeSpeR'])
+
+    # plot_spectrum(Y, a = 0.99*torch.ones(1, dtype=torch.float64), lag=48, estimator = 'WeSpeR')
