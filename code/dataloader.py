@@ -22,7 +22,8 @@ def dataloader_YF(PATH, start_date = dt.datetime(2004, 1, 1), end_date = dt.date
     return dir_files
 
 def dataloader_SP500(year, verbose = True):
-    PATH = ".\\data\\YahooFinance\\SP500\\"+str(year)
+    #PATH = "./data/YahooFinance/SP500/"+str(year)
+    PATH = os.path.join('.','data','YahooFinance','SP500',str(year))
     files = os.listdir(PATH)
     dir_files = {}
     for file in files:
@@ -62,7 +63,8 @@ def get_ticker_list(year):
     return list(df.keys())
 
 def get_domain_list(ticker_list):
-    PATH = ".\\data\\YahooFinance\\SP500\\domains.csv"
+    # PATH = ".\\data\\YahooFinance\\SP500\\domains.csv"
+    PATH = os.path.join('.','data','YahooFinance','SP500','domains.csv')
     df = pd.read_csv(PATH)
     domains = np.unique(df['GICS Sector'])
     domain_list = []

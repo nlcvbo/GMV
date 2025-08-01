@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import warnings
 
 def get_S(X):
     n,p = X.shape
@@ -45,10 +46,10 @@ def GMV_torch(X_test, Sigma, wb):
     one = torch.ones(p, dtype=X_test.dtype)
     try:
         P = torch.linalg.pinv(Sigma)
-        x = P @ one/(torch.ones((1,p)) @ P @ one)
+        x = P @ one/(torch.ones((1,p), dtype=X_test.dtype) @ P @ one)
     except:
         x = torch.ones(p, dtype=X_test.dtype, requires_grad=Sigma.requires_grad)/p
-        print("GMV: pinv failed")
+        warnings.warn("GMV: pinv failed:")
     e = get_e_torch(X_test, x)
     s = e.var()
     IC = get_IC_torch(e)
@@ -59,9 +60,10 @@ def GMV_P_torch(X_test, P, wb):
     n,p = X_test.shape
     one = torch.ones(p, dtype=X_test.dtype)
     try:
-        x = P @ one/(torch.ones((1,p)) @ P @ one)
+        x = P @ one/(torch.ones((1,p), dtype=X_test.dtype) @ P @ one)
     except:
         x = torch.ones(p, dtype=X_test.dtype, requires_grad=P.requires_grad)/p
+        warnings.warn("GMV failed")
     e = get_e_torch(X_test, x)
     s = e.var()
     IC = get_IC_torch(e)
