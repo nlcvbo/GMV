@@ -136,7 +136,9 @@ def GIS_ewma_torch(X, alpha, assume_centered = False, verbose = False):
         m_psi = theta + Htheta*1j
         m = -invlambda*m_psi
         c = p/n
-        theta1 = (torch.exp(alpha*c*(1+lambda1*m))-1)/beta/c/(1-torch.exp(-alpha+alpha*c*(1+lambda1*m)))        
+        theta1 = (torch.exp(alpha*c*(1+lambda1*m))-1)/beta/c/(1-torch.exp(-alpha+alpha*c*(1+lambda1*m))) 
+        theta2 = (1 - torch.exp(-alpha*c*(1+lambda1*m)))/beta/c/(torch.exp(-alpha*c*(1+lambda1*m))-torch.exp(-alpha))
+        theta1[(alpha*c*(1+lambda1*m)).real > 1] = theta2[(alpha*c*(1+lambda1*m)).real > 1]
         s = (1+lambda1*m).imag/theta1.imag
         delta = lambda1/s
     else:
@@ -190,7 +192,9 @@ def GIS_ewma_prec_torch(X, alpha, assume_centered = False, verbose = False):
          
         m_psi = theta + Htheta*1j
         m = -invlambda*m_psi
-        theta1 = (torch.exp(alpha*c*(1+lambda1*m))-1)/beta/c/(1-torch.exp(-alpha+alpha*c*(1+lambda1*m)))      
+        theta1 = (torch.exp(alpha*c*(1+lambda1*m))-1)/beta/c/(1-torch.exp(-alpha+alpha*c*(1+lambda1*m))) 
+        theta2 = (1 - torch.exp(-alpha*c*(1+lambda1*m)))/beta/c/(torch.exp(-alpha*c*(1+lambda1*m))-torch.exp(-alpha))
+        theta1[(alpha*c*(1+lambda1*m)).real > 1] = theta2[(alpha*c*(1+lambda1*m)).real > 1]
         s = (m*(1+lambda1*m)/theta1).imag/m.imag
         delta = s*invlambda
     else:

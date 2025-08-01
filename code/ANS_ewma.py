@@ -87,6 +87,8 @@ def analytical_shrinkage_ewma_torch(X, alpha, assume_centered = False):
         m = np.pi*Hftilde + np.pi*ftilde*1j
         c = p/n
         theta = (torch.exp(alpha*c*(1+lambda_*m))-1)/beta/c/(1-torch.exp(-alpha+alpha*c*(1+lambda_*m)))
+        theta2 = (1 - torch.exp(-alpha*c*(1+lambda_*m)))/beta/c/(torch.exp(-alpha*c*(1+lambda_*m))-torch.exp(-alpha))
+        theta[(alpha*c*(1+lambda_*m)).real > 1] = theta2[(alpha*c*(1+lambda_*m)).real > 1]
         s = (1+lambda_*m).imag/theta.imag
         dtilde = lambda_/s
     else:
@@ -105,7 +107,7 @@ def analytical_shrinkage_prec_ewma_torch(X, alpha, assume_centered = False):
     # X of shape (n,p), n >= 12
     beta = alpha/(1-torch.exp(-alpha))
     n,p = X.shape
-    eps = 1e-9
+    eps = 1e-6
     if not assume_centered:
         X -= X.mean(axis=0)[None,:]
         n -= 1
@@ -125,6 +127,9 @@ def analytical_shrinkage_prec_ewma_torch(X, alpha, assume_centered = False):
         m = np.pi*Hftilde + np.pi*ftilde*1j
         c = p/n
         theta = (torch.exp(alpha*c*(1+lambda_*m))-1)/beta/c/(1-torch.exp(-alpha+alpha*c*(1+lambda_*m)))
+        theta2 = (1 - torch.exp(-alpha*c*(1+lambda_*m)))/beta/c/(torch.exp(-alpha*c*(1+lambda_*m))-torch.exp(-alpha))
+        theta[(alpha*c*(1+lambda_*m)).real > 1] = theta2[(alpha*c*(1+lambda_*m)).real > 1]
+        
         s = (m*(1+lambda_*m)/theta).imag/m.imag
         dtilde = s*invlambda
     else:

@@ -6,8 +6,11 @@ import datetime as dt
 import warnings
 import time
 
-import weighted_LWO_estimator
-import GIS_ewma, QIS_ewma, LIS_ewma, ANS_ewma
+from weighted_LWO_estimator import wLWO_estimator_torch, wLWO_estimator_torch2
+from GIS_ewma import GIS_ewma_torch, GIS_ewma_prec_torch
+from QIS_ewma import QIS_ewma_torch, QIS_ewma_prec_torch
+from LIS_ewma import LIS_ewma_torch, LIS_ewma_prec_torch
+from ANS_ewma import analytical_shrinkage_ewma_torch, analytical_shrinkage_prec_ewma_torch
 
 from markowitz import GMV_P_torch, GMV_torch
 from dataloader import get_domain_list, close_SP500
@@ -47,27 +50,27 @@ class EWMA_model(torch.nn.Module):
                 S_ewma = Y_train_ewma.T @ (w[:,None]*Y_train_ewma)/Y_train_ewma.shape[0]/(1-(w**2/Y_train_ewma.shape[0]**2).sum(axis=0))
                 Sigma = S_ewma*torch.eye(p)
             if self.estimator == 'LWO':
-                Sigma = weighted_LWO_estimator.wLWO_estimator_torch(Y_train, w/Y_train.shape[0], assume_centered = False)
+                Sigma = wLWO_estimator_torch(Y_train, w/Y_train.shape[0], assume_centered = False)
             if self.estimator == 'ANS':
-                try:
-                    P = ANS_ewma.analytical_shrinkage_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
-                except:
-                    Sigma = ANS_ewma.analytical_shrinkage_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                # try:
+                P = analytical_shrinkage_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                # except:
+                #     Sigma = analytical_shrinkage_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
             if self.estimator == 'GIS':
                 try:
-                    P = GIS_ewma.GIS_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    P = GIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
-                    Sigma = GIS_ewma.GIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    Sigma = GIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
             if self.estimator == 'QIS':
                 try:
-                    P = QIS_ewma.QIS_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    P = QIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
-                    Sigma = QIS_ewma.QIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)                
+                    Sigma = QIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)                
             if self.estimator == 'LIS':
                 try:
-                    P = LIS_ewma.LIS_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    P = LIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
-                    Sigma = LIS_ewma.LIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    Sigma = LIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 
             if P is None:
                 e, s, IC = GMV_torch(Y_test, Sigma, wb=torch.ones(p)/p)
@@ -121,27 +124,27 @@ class EWMA_model2(torch.nn.Module):
             if self.estimator == 'LWO':
                 wX = self.b**torch.fliplr(torch.ones(Y_train.shape[0]).cumsum(axis=0)[None,:]-1)[0,:]
                 wX = wX/wX.sum(axis=0)*Y_train.shape[0]
-                Sigma = weighted_LWO_estimator.wLWO_estimator_torch2(Y_train, wX/Y_train.shape[0], w/Y_train.shape[0], assume_centered = False)
+                Sigma = wLWO_estimator_torch2(Y_train, wX/Y_train.shape[0], w/Y_train.shape[0], assume_centered = False)
             if self.estimator == 'ANS':
-                try:
-                    P = ANS_ewma.analytical_shrinkage_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
-                except:
-                    Sigma = ANS_ewma.analytical_shrinkage_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                # try:
+                P = analytical_shrinkage_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                # except:
+                #     Sigma = analytical_shrinkage_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
             if self.estimator == 'GIS':
                 try:
-                    P = GIS_ewma.GIS_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    P = GIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
-                    Sigma = GIS_ewma.GIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    Sigma = GIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
             if self.estimator == 'QIS':
                 try:
-                    P = QIS_ewma.QIS_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    P = QIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
-                    Sigma = QIS_ewma.QIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)                
+                    Sigma = QIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)                
             if self.estimator == 'LIS':
                 try:
-                    P = LIS_ewma.LIS_prec_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    P = LIS_ewma_prec_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 except:
-                    Sigma = LIS_ewma.LIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
+                    Sigma = LIS_ewma_torch(wsq[:,None]*Y_train_ewma, alpha, assume_centered = True)
                 
             if P is None:
                 e, s, IC = GMV_torch(Y_test, Sigma, wb=torch.ones(p)/p)
@@ -260,6 +263,7 @@ def plot_vol(Y, a_tab, lag = 24, estimator_list = ['LWO']):
     
 
 if __name__ == "__main__":
+    import importlib
     import matplotlib
     try:
         matplotlib.use('tkagg')
@@ -292,5 +296,5 @@ if __name__ == "__main__":
     #print("Best a =", best_a)
     #print("Best b =", best_b)
 
-    a_tab = list(np.linspace(0.91,1.02,10))
-    plot_vol(Y, a_tab, lag = 48, estimator_list = ['ANS'])#['LWO', 'S', 'GIS', 'QIS'])
+    a_tab = list(np.linspace(0.92,1.02,60))
+    plot_vol(Y, a_tab, lag = 48, estimator_list = ['LWO', 'S', 'GIS', 'QIS', 'ANS'])
