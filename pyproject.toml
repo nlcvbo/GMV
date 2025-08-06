@@ -1,0 +1,11 @@
+# pyproject.toml
+
+[tool.black]
+line-length = 88
+target-version = ['py312']
+
+[tool.ruff]
+line-length = 88
+lint.select = ["E", "F", "W", "I"]
+lint.ignore = []
+target-version = "py312"
