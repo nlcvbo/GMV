@@ -6,11 +6,12 @@ import seaborn as sns
 import torch
 from ANS_ewma import (
     analytical_shrinkage_ewma_torch,
+    analytical_shrinkage_prec_ewma_ridge_torch,
     analytical_shrinkage_prec_ewma_torch,
 )
 from GIS_ewma import GIS_ewma_prec_torch, GIS_ewma_torch
 from LIS_ewma import LIS_ewma_prec_torch, LIS_ewma_torch
-from QIS_ewma import QIS_ewma_prec_torch, QIS_ewma_torch
+from QIS_ewma import QIS_ewma_prec_ridge_torch, QIS_ewma_prec_torch, QIS_ewma_torch
 from weighted_LWO_estimator import wLWO_estimator_torch, wLWO_estimator_torch2
 
 sys.path.insert(0, "./WeSpeR/code/WeSpeR_LD")
@@ -400,7 +401,6 @@ def plot_spectrum(Y, a=0.99, lag=48, estimator="S"):
     eigenvalue_sets = []
     for i in range(lag, Y.shape[0] // 20):
         Y_train = Y[max(0, (i - lag) * 20) : i * 20]
-        Y[i * 20 : (i + 1) * 20]
 
         alpha = -torch.log(a) * Y_train.shape[0]
         alpha / (1 - torch.exp(-alpha))
@@ -521,6 +521,150 @@ def plot_spectrum(Y, a=0.99, lag=48, estimator="S"):
     plt.title("Distribution of Eigenvalues of P at Each Rank, " + estimator)
     plt.xlabel("Eigenvalue Rank")
     plt.ylabel("Eigenvalue")
+    plt.grid(True)
+    plt.show()
+
+
+def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48):
+    n, p = Y.shape
+    lambda_tab = []
+    tau_tab = []
+    tauLWO_tab = []
+    tauANS_tab = []
+    tauQIS_tab = []
+    for i in range(lag, Y.shape[0] // 20):
+        Y_train = Y[max(0, (i - lag) * 20) : i * 20]
+        Y_test = Y[i * 20 : (i + 1) * 20]
+
+        alpha = -torch.log(a) * Y_train.shape[0]
+        w = (
+            a
+            ** torch.fliplr(torch.ones(Y_train.shape[0]).cumsum(axis=0)[None, :] - 1)[
+                0, :
+            ]
+        )
+        w = w / w.sum(axis=0) * Y_train.shape[0]
+        wsq = torch.sqrt(w)
+
+        Y_train_ewma_mean = (w[:, None] * Y_train).sum(axis=0)[None, :] / w.sum(axis=0)
+        Y_train_ewma = Y_train - Y_train_ewma_mean
+        S_ewma = (
+            Y_train_ewma.T
+            @ (w[:, None] * Y_train_ewma)
+            / Y_train_ewma.shape[0]
+            / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+        )
+        S_LWO = wLWO_estimator_torch(
+            Y_train, w / Y_train.shape[0], assume_centered=False
+        )
+        P_ANS = analytical_shrinkage_prec_ewma_ridge_torch(
+            wsq[:, None] * Y_train_ewma, alpha, ridge=ridge, assume_centered=True
+        )
+        P_QIS = QIS_ewma_prec_ridge_torch(
+            wsq[:, None] * Y_train_ewma, alpha, ridge=ridge, assume_centered=True
+        )
+
+        Y_test_mean = Y_test.mean(axis=0)[None, :]
+        Y_test_centered = Y_test - Y_test_mean
+        S_test = Y_test_centered.T @ Y_test_centered / (Y_test_centered.shape[0] - 1)
+
+        lambda_, U = torch.linalg.eigh(S_ewma)
+        tau = torch.diag(U.T @ S_test @ U)
+
+        lambda_tab += [lambda_]
+        tau_tab += [tau]
+        tauLWO_tab += [torch.linalg.eigvals(S_LWO)]
+        tauANS_tab += [torch.sort(1 / torch.linalg.eigvals(P_ANS))[0]]
+        tauQIS_tab += [torch.sort(1 / torch.linalg.eigvals(P_QIS))[0]]
+
+    lambda_tab = torch.concatenate(lambda_tab).numpy()
+    tau_tab = torch.concatenate(tau_tab).numpy()
+    tauLWO_tab = torch.concatenate(tauLWO_tab).numpy()
+    tauANS_tab = torch.concatenate(tauANS_tab).numpy()
+    tauQIS_tab = torch.concatenate(tauQIS_tab).numpy()
+    lambda_inv = 1 / lambda_tab
+    tau_inv = 1 / tau_tab
+    tauLWO_inv = 1 / tauLWO_tab
+    tauANS_inv = 1 / tauANS_tab
+    tauQIS_inv = 1 / tauQIS_tab
+
+    loglambda_dense = np.log(np.sort(np.random.choice(lambda_inv, 1000)))
+
+    def kernel_regression_np(x_dense, x_obs, y_obs, bandwidth):
+        weights = np.exp(
+            -0.5 * ((x_dense[:, None] - x_obs[None, :]) / bandwidth) ** 2
+        ) / (bandwidth * np.sqrt(2 * np.pi))
+        smoothed_values = (weights * y_obs[None, :]).sum(axis=1) / weights.sum(axis=1)
+        return smoothed_values
+
+    bandwidth = 0.5
+    logtau_smooth = kernel_regression_np(
+        loglambda_dense, np.log(lambda_inv), np.log(tau_inv), bandwidth
+    )
+    logtauLWO_smooth = kernel_regression_np(
+        loglambda_dense, np.log(lambda_inv), np.log(tauLWO_inv), bandwidth
+    )
+    logtauANS_smooth = kernel_regression_np(
+        loglambda_dense, np.log(lambda_inv), np.log(tauANS_inv), bandwidth
+    )
+    logtauQIS_smooth = kernel_regression_np(
+        loglambda_dense, np.log(lambda_inv), np.log(tauQIS_inv), bandwidth
+    )
+    logtauridgeANS_smooth = kernel_regression_np(
+        loglambda_dense,
+        np.log(lambda_inv),
+        np.log(1 / (ridge + 1 / tauANS_inv)),
+        bandwidth,
+    )
+    logtauridgeQIS_smooth = kernel_regression_np(
+        loglambda_dense,
+        np.log(lambda_inv),
+        np.log(1 / (ridge + 1 / tauQIS_inv)),
+        bandwidth,
+    )
+
+    plt.figure()
+    plt.plot(loglambda_dense, logtau_smooth, label="Log of realized variance")
+    plt.plot(loglambda_dense, logtauLWO_smooth, label="LWO")
+    plt.plot(loglambda_dense, logtauANS_smooth, label="ANS")
+    plt.plot(loglambda_dense, logtauQIS_smooth, label="QIS")
+    plt.plot(loglambda_dense, logtauridgeANS_smooth, label="Ridge ANS")
+    plt.plot(loglambda_dense, logtauridgeQIS_smooth, label="Ridge QIS")
+    # plt.scatter(lambda_inv, tau_inv, color='red', label='Original data', zorder=5)
+    plt.xlabel(r"$\log \lambda_{inv}$")
+    plt.ylabel(r"$\log \tau_{inv}$")
+    plt.title(r"Kernel regression of $\log \tau_{inv}$ vs $\log \lambda_{inv}$")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    plt.figure()
+    plt.plot(np.exp(loglambda_dense), np.exp(logtau_smooth), label="Relalized variance")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauLWO_smooth), label="LWO")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauANS_smooth), label="ANS")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauQIS_smooth), label="QIS")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauridgeANS_smooth), label="Ridge ANS")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauridgeQIS_smooth), label="Ridge QIS")
+    # plt.scatter(lambda_inv, tau_inv, color='red', label='Original data', zorder=5)
+    plt.xlabel(r"$\lambda_{inv}$")
+    plt.ylabel(r"$\tau_{inv}$")
+    plt.title(r"Kernel regression of $\tau_{inv}$ vs $\lambda_{inv}$")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+    plt.figure()
+    plt.plot(np.exp(logtau_smooth), label="Relalized variance")
+    plt.plot(np.exp(logtauLWO_smooth), label="LWO")
+    plt.plot(np.exp(logtauANS_smooth), label="ANS")
+    plt.plot(np.exp(logtauQIS_smooth), label="QIS")
+    plt.plot(np.exp(logtauridgeANS_smooth), label="Ridge ANS")
+    plt.plot(np.exp(logtauridgeQIS_smooth), label="Ridge QIS")
+    # plt.scatter(lambda_inv, tau_inv, color='red', label='Original data', zorder=5)
+    plt.xlabel(r"rank")
+    plt.ylabel(r"$\tau_{inv}$")
+    plt.title(r"Kernel regression of $\tau_{inv}$, ranked")
+    plt.legend()
     plt.grid(True)
     plt.show()
 

@@ -242,3 +242,73 @@ def analytical_shrinkage_prec_ewma_torch(X, alpha, assume_centered=False):
 
     psitilde = u @ torch.diag(dtilde) @ u.T
     return psitilde
+
+
+def analytical_shrinkage_prec_ewma_ridge_torch(
+    X, alpha, ridge=1e-3, assume_centered=False
+):
+    # X of shape (n,p), n >= 12
+    beta = alpha / (1 - torch.exp(-alpha))
+    n, p = X.shape
+    eps = 1e-6
+    if not assume_centered:
+        X -= X.mean(axis=0)[None, :]
+        n -= 1
+    sample = X.T @ X / n
+    lambda_, u = torch.linalg.eigh(sample)
+    lambda_ = lambda_[max(0, p - n) : p]
+    invlambda = 1 / lambda_[max(1, p - n + 1) - 1 : p]
+    L = torch.repeat_interleave(lambda_[:, None], min(p, n), axis=1)
+    h = n ** (-1 / 3)
+    H = h * L.T
+    x = (L - L.T) / H
+    ftilde = (3 / 4 / np.sqrt(5)) * torch.mean(
+        torch.maximum(
+            1 - x**2 / 5,
+            torch.zeros(x.shape, dtype=x.dtype, requires_grad=x.requires_grad),
+        )
+        / H,
+        axis=1,
+    )
+    Hftemp = (-3 / 10 / np.pi) * x + (3 / 4 / np.sqrt(5) / np.pi) * (
+        1 - x**2 / 5
+    ) * torch.log(torch.abs((np.sqrt(5) - x) / (np.sqrt(5) + x)))
+    Hftemp[torch.abs(torch.abs(x) - np.sqrt(5)) < eps] = (-3 / 10 / np.pi) * x[
+        torch.abs(torch.abs(x) - np.sqrt(5)) < eps
+    ]
+    Hftilde = (Hftemp / H).mean(axis=1)
+    if p <= n:
+        m = np.pi * Hftilde + np.pi * ftilde * 1j
+        c = p / n
+        theta = (
+            (torch.exp(alpha * c * (1 + lambda_ * m)) - 1)
+            / beta
+            / c
+            / (1 - torch.exp(-alpha + alpha * c * (1 + lambda_ * m)))
+        )
+        theta2 = (
+            (1 - torch.exp(-alpha * c * (1 + lambda_ * m)))
+            / beta
+            / c
+            / (torch.exp(-alpha * c * (1 + lambda_ * m)) - torch.exp(-alpha))
+        )
+        theta[(alpha * c * (1 + lambda_ * m)).real > 1] = theta2[
+            (alpha * c * (1 + lambda_ * m)).real > 1
+        ]
+
+        s = (m * (1 + lambda_ * m) / theta).imag / m.imag
+        dtilde = s * invlambda
+    else:
+        raise ValueError(
+            "p <= n necessary for precision nl analytical shrinkage estimation."
+        )
+
+    x = torch.min(invlambda)
+    dtilde[dtilde < x] = x
+    dtilde[max(0, p - n) : p] = torch.sort(dtilde[max(0, p - n) : p], descending=True)[
+        0
+    ]
+    dtilde = 1 / (ridge + 1 / dtilde)
+
+    psitilde = u @ torch.diag(dtilde) @ u.T
+    return psitilde

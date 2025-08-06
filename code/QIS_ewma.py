@@ -252,3 +252,74 @@ def QIS_ewma_prec_torch(X, alpha, assume_centered=False, verbose=False):
 
     psihat = (u @ torch.diag(delta) @ u.T.conj()).real
     return psihat
+
+
+def QIS_ewma_prec_ridge_torch(
+    X, alpha, ridge=1e-3, assume_centered=False, verbose=False
+):
+    n, p = X.shape
+
+    # default setting
+    if assume_centered:
+        X -= X.mean(axis=0)[None, :]
+        n = n - 1
+
+    c = p / n
+    beta = alpha / (1 - torch.exp(-alpha))
+    sample = X.T @ X / n
+    sample = (sample + sample.T) / 2  # make symmetrical
+
+    # Spectral decomp
+    lambda1, u = torch.linalg.eigh(
+        sample
+    )  # use Cholesky factorisation based on hermitian matrix
+    lambda1 = lambda1.real.clip(min=0)  # reset negative values to 0
+
+    # COMPUTE Quadratic-Inverse Shrinkage estimator of the covariance matrix
+    h = (min(c**2, 1 / c**2) ** 0.35) / p**0.35  # smoothing parameter
+    invlambda = (
+        1 / lambda1[max(1, p - n + 1) - 1 : p]
+    )  # inverse of (non-null) eigenvalues
+
+    Lj = torch.repeat_interleave(invlambda[:, None], min(p, n), axis=1)
+    Lj_i = Lj - Lj.T
+
+    theta = (Lj * Lj_i / (Lj_i**2 + Lj**2 * h**2)).mean(
+        axis=0
+    )  # smoothed Stein shrinker
+    Htheta = (Lj**2 * h / (Lj_i**2 + Lj**2 * h**2)).mean(axis=0)  # its conjugate
+
+    if p <= n:  # case where sample covariance matrix is not singular
+        (1 - c) * invlambda + 2 * c * invlambda * theta
+
+        m_psi = theta + Htheta * 1j
+        m = -invlambda * m_psi
+        theta1 = (
+            (torch.exp(alpha * c * (1 + lambda1 * m)) - 1)
+            / beta
+            / c
+            / (1 - torch.exp(-alpha + alpha * c * (1 + lambda1 * m)))
+        )
+        theta2 = (
+            (1 - torch.exp(-alpha * c * (1 + lambda1 * m)))
+            / beta
+            / c
+            / (torch.exp(-alpha * c * (1 + lambda1 * m)) - torch.exp(-alpha))
+        )
+        theta1[(alpha * c * (1 + lambda1 * m)).real > 1] = theta2[
+            (alpha * c * (1 + lambda1 * m)).real > 1
+        ]
+        s = (m * (1 + lambda1 * m) / theta1).imag / m.imag
+        delta = s * invlambda
+    else:
+        raise ValueError(
+            "p <= n necessary for precision nl analytical shrinkage estimation."
+        )
+
+    x = torch.min(invlambda)
+    delta[delta < x] = x
+    delta[max(0, p - n) : p] = torch.sort(delta[max(0, p - n) : p], descending=True)[0]
+    delta = 1 / (ridge + 1 / delta)
+
+    psihat = (u @ torch.diag(delta) @ u.T.conj()).real
+    return psihat
