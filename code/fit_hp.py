@@ -6,12 +6,11 @@ import seaborn as sns
 import torch
 from ANS_ewma import (
     analytical_shrinkage_ewma_torch,
-    analytical_shrinkage_prec_ewma_ridge_torch,
     analytical_shrinkage_prec_ewma_torch,
 )
 from GIS_ewma import GIS_ewma_prec_torch, GIS_ewma_torch
 from LIS_ewma import LIS_ewma_prec_torch, LIS_ewma_torch
-from QIS_ewma import QIS_ewma_prec_ridge_torch, QIS_ewma_prec_torch, QIS_ewma_torch
+from QIS_ewma import QIS_ewma_prec_torch, QIS_ewma_torch
 from weighted_LWO_estimator import wLWO_estimator_torch, wLWO_estimator_torch2
 
 sys.path.insert(0, "./WeSpeR/code/WeSpeR_LD")
@@ -525,7 +524,7 @@ def plot_spectrum(Y, a=0.99, lag=48, estimator="S"):
     plt.show()
 
 
-def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48):
+def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=None, lag=48):
     n, p = Y.shape
     lambda_tab = []
     tau_tab = []
@@ -557,11 +556,11 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48)
         S_LWO = wLWO_estimator_torch(
             Y_train, w / Y_train.shape[0], assume_centered=False
         )
-        P_ANS = analytical_shrinkage_prec_ewma_ridge_torch(
-            wsq[:, None] * Y_train_ewma, alpha, ridge=ridge, assume_centered=True
+        P_ANS = analytical_shrinkage_prec_ewma_torch(
+            wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
         )
-        P_QIS = QIS_ewma_prec_ridge_torch(
-            wsq[:, None] * Y_train_ewma, alpha, ridge=ridge, assume_centered=True
+        P_QIS = QIS_ewma_prec_torch(
+            wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
         )
 
         Y_test_mean = Y_test.mean(axis=0)[None, :]
@@ -573,9 +572,9 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48)
 
         lambda_tab += [lambda_]
         tau_tab += [tau]
-        tauLWO_tab += [torch.linalg.eigvals(S_LWO)]
-        tauANS_tab += [torch.sort(1 / torch.linalg.eigvals(P_ANS))[0]]
-        tauQIS_tab += [torch.sort(1 / torch.linalg.eigvals(P_QIS))[0]]
+        tauLWO_tab += [torch.linalg.eigvalsh(S_LWO)]
+        tauANS_tab += [torch.sort(1 / torch.linalg.eigvalsh(P_ANS))[0]]
+        tauQIS_tab += [torch.sort(1 / torch.linalg.eigvalsh(P_QIS))[0]]
 
     lambda_tab = torch.concatenate(lambda_tab).numpy()
     tau_tab = torch.concatenate(tau_tab).numpy()
@@ -610,16 +609,28 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48)
     logtauQIS_smooth = kernel_regression_np(
         loglambda_dense, np.log(lambda_inv), np.log(tauQIS_inv), bandwidth
     )
+    logtauridgeS_smooth = kernel_regression_np(
+        loglambda_dense,
+        np.log(lambda_inv),
+        np.log(1 / (ridge_dict["S"] + 1 / lambda_inv)),
+        bandwidth,
+    )
+    logtauridgeLWO_smooth = kernel_regression_np(
+        loglambda_dense,
+        np.log(lambda_inv),
+        np.log(1 / (ridge_dict["LWO"] + 1 / tauLWO_inv)),
+        bandwidth,
+    )
     logtauridgeANS_smooth = kernel_regression_np(
         loglambda_dense,
         np.log(lambda_inv),
-        np.log(1 / (ridge + 1 / tauANS_inv)),
+        np.log(1 / (ridge_dict["ANS"] + 1 / tauANS_inv)),
         bandwidth,
     )
     logtauridgeQIS_smooth = kernel_regression_np(
         loglambda_dense,
         np.log(lambda_inv),
-        np.log(1 / (ridge + 1 / tauQIS_inv)),
+        np.log(1 / (ridge_dict["QIS"] + 1 / tauQIS_inv)),
         bandwidth,
     )
 
@@ -628,6 +639,8 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48)
     plt.plot(loglambda_dense, logtauLWO_smooth, label="LWO")
     plt.plot(loglambda_dense, logtauANS_smooth, label="ANS")
     plt.plot(loglambda_dense, logtauQIS_smooth, label="QIS")
+    plt.plot(loglambda_dense, logtauridgeS_smooth, label="Ridge S")
+    plt.plot(loglambda_dense, logtauridgeLWO_smooth, label="Ridge LWO")
     plt.plot(loglambda_dense, logtauridgeANS_smooth, label="Ridge ANS")
     plt.plot(loglambda_dense, logtauridgeQIS_smooth, label="Ridge QIS")
     # plt.scatter(lambda_inv, tau_inv, color='red', label='Original data', zorder=5)
@@ -639,10 +652,12 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48)
     plt.show()
 
     plt.figure()
-    plt.plot(np.exp(loglambda_dense), np.exp(logtau_smooth), label="Relalized variance")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtau_smooth), label="Realized variance")
     plt.plot(np.exp(loglambda_dense), np.exp(logtauLWO_smooth), label="LWO")
     plt.plot(np.exp(loglambda_dense), np.exp(logtauANS_smooth), label="ANS")
     plt.plot(np.exp(loglambda_dense), np.exp(logtauQIS_smooth), label="QIS")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauridgeS_smooth), label="Ridge S")
+    plt.plot(np.exp(loglambda_dense), np.exp(logtauridgeLWO_smooth), label="Ridge LWO")
     plt.plot(np.exp(loglambda_dense), np.exp(logtauridgeANS_smooth), label="Ridge ANS")
     plt.plot(np.exp(loglambda_dense), np.exp(logtauridgeQIS_smooth), label="Ridge QIS")
     # plt.scatter(lambda_inv, tau_inv, color='red', label='Original data', zorder=5)
@@ -654,12 +669,15 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge=1e-3, lag=48)
     plt.show()
 
     plt.figure()
-    plt.plot(np.exp(logtau_smooth), label="Relalized variance")
+    plt.plot(np.exp(logtau_smooth), label="Realized variance")
     plt.plot(np.exp(logtauLWO_smooth), label="LWO")
     plt.plot(np.exp(logtauANS_smooth), label="ANS")
     plt.plot(np.exp(logtauQIS_smooth), label="QIS")
+    plt.plot(np.exp(logtauridgeS_smooth), label="Ridge S")
+    plt.plot(np.exp(logtauridgeLWO_smooth), label="Ridge LWO")
     plt.plot(np.exp(logtauridgeANS_smooth), label="Ridge ANS")
     plt.plot(np.exp(logtauridgeQIS_smooth), label="Ridge QIS")
+    plt.plot(np.exp(loglambda_dense), label="S")
     # plt.scatter(lambda_inv, tau_inv, color='red', label='Original data', zorder=5)
     plt.xlabel(r"rank")
     plt.ylabel(r"$\tau_{inv}$")
@@ -1025,15 +1043,15 @@ if __name__ == "__main__":
         print("Data loading:", end_time - beg_time)
 
     beg_time = time.time()
-    model, best_a, best_q, loss = minimization(
-        Y, a=0.99, q=0.05, lag=36, n_epochs=30, lr=2e-3, estimator="GIS", verbose=True
-    )
+    # model, best_a, best_q, loss = minimization(
+    #     Y, a=0.99, q=0.05, lag=36, n_epochs=30, lr=2e-3, estimator="GIS", verbose=True
+    # )
     # model, best_a, best_b, loss = minimization2(Y, a = 0.99, b = 0.99, \
     # lag = 48, n_epochs = 30, lr = 1e-3, estimator = 'LWO', verbose = True)
     end_time = time.time()
-    print("Minimization:", end_time - beg_time)
-    print("Best a =", best_a)
-    print("Best q =", best_q)
+    # print("Minimization:", end_time - beg_time)
+    # print("Best a =", best_a)
+    # print("Best q =", best_q)
     # print("Best b =", best_b)
 
     a_tab = list(np.linspace(0.91, 1.01, 60))
@@ -1042,3 +1060,7 @@ if __name__ == "__main__":
 
     # plot_spectrum(Y, a = 0.99*torch.ones(1, dtype=torch.float64), lag=48, \
     # estimator = 'WeSpeR')
+    ridge_dict = {"S": 1.6648e-5, "LWO": 1.7472e-5, "ANS": 1.6012e-5, "QIS": 1.6012e-5}
+    plot_var(
+        Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=ridge_dict, lag=48
+    )
