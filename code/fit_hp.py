@@ -5,12 +5,29 @@ import numpy as np
 import seaborn as sns
 import torch
 from ANS_ewma import (
+    analytical_shrinkage_ewma_ridge_torch,
     analytical_shrinkage_ewma_torch,
+    analytical_shrinkage_prec_ewma_ridge_torch,
     analytical_shrinkage_prec_ewma_torch,
 )
-from GIS_ewma import GIS_ewma_prec_torch, GIS_ewma_torch
-from LIS_ewma import LIS_ewma_prec_torch, LIS_ewma_torch
-from QIS_ewma import QIS_ewma_prec_torch, QIS_ewma_torch
+from GIS_ewma import (
+    GIS_ewma_prec_ridge_torch,
+    GIS_ewma_prec_torch,
+    GIS_ewma_ridge_torch,
+    GIS_ewma_torch,
+)
+from LIS_ewma import (
+    LIS_ewma_prec_ridge_torch,
+    LIS_ewma_prec_torch,
+    LIS_ewma_ridge_torch,
+    LIS_ewma_torch,
+)
+from QIS_ewma import (
+    QIS_ewma_prec_ridge_torch,
+    QIS_ewma_prec_torch,
+    QIS_ewma_ridge_torch,
+    QIS_ewma_torch,
+)
 from weighted_LWO_estimator import wLWO_estimator_torch, wLWO_estimator_torch2
 
 sys.path.insert(0, "./WeSpeR/code/WeSpeR_LD")
@@ -52,8 +69,6 @@ class EWMA_model(torch.nn.Module):
             )
             w = w / w.sum(axis=0) * Y_train.shape[0]
             wsq = torch.sqrt(w)
-            W = torch.diag(w)
-            torch.sqrt(W)
 
             Y_train_ewma_mean = (w[:, None] * Y_train).sum(axis=0)[None, :] / w.sum(
                 axis=0
@@ -196,8 +211,6 @@ class EWMA_model2(torch.nn.Module):
             )
             w = w / w.sum(axis=0) * Y_train.shape[0]
             wsq = torch.sqrt(w)
-            W = torch.diag(w)
-            torch.sqrt(W)
 
             Y_train_ewma_mean = (w[:, None] * Y_train).sum(axis=0)[None, :] / w.sum(
                 axis=0
@@ -290,6 +303,146 @@ class EWMA_model2(torch.nn.Module):
         return self.b
 
 
+class EWMA_ridge_model(torch.nn.Module):
+    def __init__(self, a=1.0, ridge=1e-5, lag=24, estimator="S"):
+        super().__init__()
+        self.a = torch.nn.Parameter(a * torch.ones(1).type(torch.float64))
+        self.logridge = torch.nn.Parameter(
+            torch.log(ridge * torch.ones(1).type(torch.float64))
+        )
+        self.lag = lag
+        self.estimator = estimator
+
+    def forward(self, Y):
+        n, p = Y.shape
+        res_s = torch.zeros(Y.shape[0] // 20 - self.lag, dtype=Y.dtype)
+        res_e = torch.zeros(Y.shape[0] // 20 - self.lag, dtype=Y.dtype)
+        for i in range(self.lag, Y.shape[0] // 20):
+            Y_train = Y[max(0, (i - self.lag) * 20) : i * 20]
+            Y_test = Y[i * 20 : (i + 1) * 20]
+
+            alpha = -torch.log(self.a) * Y_train.shape[0]
+            alpha / (1 - torch.exp(-alpha))
+            w = (
+                self.a
+                ** torch.fliplr(
+                    torch.ones(Y_train.shape[0]).cumsum(axis=0)[None, :] - 1
+                )[0, :]
+            )
+            w = w / w.sum(axis=0) * Y_train.shape[0]
+            wsq = torch.sqrt(w)
+
+            Y_train_ewma_mean = (w[:, None] * Y_train).sum(axis=0)[None, :] / w.sum(
+                axis=0
+            )
+            Y_train_ewma = Y_train - Y_train_ewma_mean
+
+            P, Sigma = None, None
+            if self.estimator == "S":
+                Sigma = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+                lambda_, U = torch.linalg.eigh(Sigma)
+                P = U @ torch.diag(1 / (torch.exp(self.logridge) + lambda_)) @ U.T
+            if self.estimator == "Var":
+                S_ewma = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+                lambda_ = torch.diag(S_ewma)
+                P = torch.diag(1 / (torch.exp(self.logridge) + lambda_))
+            if self.estimator == "LWO":
+                Sigma = wLWO_estimator_torch(
+                    Y_train, w / Y_train.shape[0], assume_centered=False
+                )
+                lambda_, U = torch.linalg.eigh(Sigma)
+                P = U @ torch.diag(1 / (torch.exp(self.logridge) + lambda_)) @ U.T
+            if self.estimator == "ANS":
+                try:
+                    P = analytical_shrinkage_prec_ewma_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+                except ValueError:
+                    Sigma = analytical_shrinkage_ewma_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+            if self.estimator == "GIS":
+                try:
+                    P = GIS_ewma_prec_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+                except ValueError:
+                    Sigma = GIS_ewma_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+            if self.estimator == "QIS":
+                try:
+                    P = QIS_ewma_prec_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+                except ValueError:
+                    Sigma = QIS_ewma_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+            if self.estimator == "LIS":
+                try:
+                    P = LIS_ewma_prec_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+                except ValueError:
+                    Sigma = LIS_ewma_ridge_torch(
+                        wsq[:, None] * Y_train_ewma,
+                        alpha,
+                        torch.exp(self.logridge),
+                        assume_centered=True,
+                    )
+
+            if P is None:
+                P = torch.linalg.pinv(Sigma)
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p) / p)
+            else:
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p) / p)
+            res_s[i - self.lag] = s
+            res_e[i - self.lag] = e
+
+        vol = torch.sqrt(res_s.mean(axis=0) * 252)
+        mu = res_e.mean(axis=0) / 20 * 252
+        sharpe = mu / vol
+        return vol, mu, sharpe
+
+    def get_a(self):
+        return self.a
+
+    def get_ridge(self):
+        return torch.exp(self.logridge)
+
+
 def minimization(
     Y, a=1.0, q=0.05, lag=24, n_epochs=10, lr=1e-2, estimator="S", verbose=True
 ):
@@ -358,6 +511,41 @@ def minimization2(
         print("Final loss:", best_loss)
 
     return model, best_a, best_b, np.array(running_loss)
+
+
+def minimization_ridge(
+    Y, a=1.0, ridge=1e-5, lag=24, n_epochs=10, lr=1e-2, estimator="S", verbose=True
+):
+    model = EWMA_ridge_model(a=a, ridge=ridge, lag=lag, estimator=estimator)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    running_loss = []
+    best_loss = np.inf
+    best_a = a * torch.ones(1).type(torch.float64)
+    best_ridge = ridge * torch.ones(1).type(torch.float64)
+
+    model.train(True)
+    for i in range(n_epochs):
+        optimizer.zero_grad()
+        vol, mu, sharpe = model(Y)
+        loss = vol
+        loss.backward()
+        optimizer.step()
+
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_a = model.get_a().detach()
+            best_ridge = model.get_ridge().detach()
+
+        running_loss += [loss.item()]
+
+        if verbose:
+            if n_epochs <= 10 or i % (n_epochs // 10) == 0:
+                print("Loss epoch", i, ":", loss.item())
+    if verbose:
+        print("Final loss:", best_loss)
+
+    return model, best_a, best_ridge, np.array(running_loss)
 
 
 def plot_vol(Y, a_tab, lag=24, estimator_list=["LWO"]):
@@ -649,7 +837,6 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=None, la
     plt.title(r"Kernel regression of $\log \tau_{inv}$ vs $\log \lambda_{inv}$")
     plt.legend()
     plt.grid(True)
-    plt.show()
 
     plt.figure()
     plt.plot(np.exp(loglambda_dense), np.exp(logtau_smooth), label="Realized variance")
@@ -666,7 +853,6 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=None, la
     plt.title(r"Kernel regression of $\tau_{inv}$ vs $\lambda_{inv}$")
     plt.legend()
     plt.grid(True)
-    plt.show()
 
     plt.figure()
     plt.plot(np.exp(logtau_smooth), label="Realized variance")
@@ -684,13 +870,14 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=None, la
     plt.title(r"Kernel regression of $\tau_{inv}$, ranked")
     plt.legend()
     plt.grid(True)
-    plt.show()
+    plt.show(block=True)
 
 
 if __name__ == "__main__":
     import matplotlib
 
     try:
+        # matplotlib.use("tkagg")
         matplotlib.use("tkagg")
         matplotlib.pyplot.ion()
     except Exception:
@@ -1048,9 +1235,13 @@ if __name__ == "__main__":
     # )
     # model, best_a, best_b, loss = minimization2(Y, a = 0.99, b = 0.99, \
     # lag = 48, n_epochs = 30, lr = 1e-3, estimator = 'LWO', verbose = True)
-    end_time = time.time()
+    # model, best_a, best_ridge, loss = minimization_ridge(Y, a = 0.99, \
+    # ridge = 1.6012e-5, lag = 24, n_epochs = 10, lr = 1e-3, \
+    # estimator = 'ANS', verbose = True)
+    # end_time = time.time()
     # print("Minimization:", end_time - beg_time)
     # print("Best a =", best_a)
+    # print("Best ridge =", best_ridge)
     # print("Best q =", best_q)
     # print("Best b =", best_b)
 
@@ -1062,5 +1253,5 @@ if __name__ == "__main__":
     # estimator = 'WeSpeR')
     ridge_dict = {"S": 1.6648e-5, "LWO": 1.7472e-5, "ANS": 1.6012e-5, "QIS": 1.6012e-5}
     plot_var(
-        Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=ridge_dict, lag=48
+        Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=ridge_dict, lag=24
     )

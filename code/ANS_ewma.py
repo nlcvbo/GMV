@@ -244,9 +244,89 @@ def analytical_shrinkage_prec_ewma_torch(X, alpha, assume_centered=False):
     return psitilde
 
 
-def analytical_shrinkage_prec_ewma_ridge_torch(
-    X, alpha, ridge=1e-3, assume_centered=False
-):
+def analytical_shrinkage_ewma_ridge_torch(X, alpha, ridge, assume_centered=False):
+    # X of shape (n,p), n >= 12
+    beta = alpha / (1 - torch.exp(-alpha))
+    n, p = X.shape
+    if not assume_centered:
+        X -= X.mean(axis=0)[None, :]
+        n -= 1
+    sample = X.T @ X / n
+    lambda_, u = torch.linalg.eigh(sample)
+    lambda_ = lambda_[max(0, p - n) : p]
+    L = torch.repeat_interleave(lambda_[:, None], min(p, n), axis=1)
+    h = n ** (-1 / 3)
+    H = h * L.T
+    x = (L - L.T) / H
+    ftilde = (3 / 4 / np.sqrt(5)) * torch.mean(
+        torch.maximum(
+            1 - x**2 / 5,
+            torch.zeros(x.shape, dtype=x.dtype, requires_grad=x.requires_grad),
+        )
+        / H,
+        axis=1,
+    )
+    Hftemp = (-3 / 10 / np.pi) * x + (3 / 4 / np.sqrt(5) / np.pi) * (
+        1 - x**2 / 5
+    ) * torch.log(torch.abs((np.sqrt(5) - x) / (np.sqrt(5) + x)))
+    Hftemp[torch.abs(x) == np.sqrt(5)] = (-3 / 10 / np.pi) * x[
+        torch.abs(x) == np.sqrt(5)
+    ]
+    Hftilde = (Hftemp / H).mean(axis=1)
+    if p <= n:
+        m = np.pi * Hftilde + np.pi * ftilde * 1j
+        c = p / n
+        theta = (
+            (torch.exp(alpha * c * (1 + lambda_ * m)) - 1)
+            / beta
+            / c
+            / (1 - torch.exp(-alpha + alpha * c * (1 + lambda_ * m)))
+        )
+        theta2 = (
+            (1 - torch.exp(-alpha * c * (1 + lambda_ * m)))
+            / beta
+            / c
+            / (torch.exp(-alpha * c * (1 + lambda_ * m)) - torch.exp(-alpha))
+        )
+        theta[(alpha * c * (1 + lambda_ * m)).real > 1] = theta2[
+            (alpha * c * (1 + lambda_ * m)).real > 1
+        ]
+        s = (1 + lambda_ * m).imag / theta.imag
+        dtilde = lambda_ / s
+    else:
+        # TODO
+        Hftilde0 = (
+            (1 / np.pi)
+            * (
+                3 / 10 / h**2
+                + 3
+                / 4
+                / np.sqrt(5)
+                / h
+                * (1 - 1 / 5 / h**2)
+                * torch.log((1 + np.sqrt(5) * h) / (1 - np.sqrt(5) * h))
+            )
+            * (1 / lambda_).mean(axis=0)
+        )
+        dtilde0 = 1 / (np.pi * (p - n) / n * Hftilde0)
+        dtilde1 = lambda_ / (np.pi**2 * lambda_**2 * (ftilde**2 + Hftilde**2))
+        dtilde = torch.concatenate(
+            [
+                dtilde0
+                * torch.ones((p - n), dtype=x.dtype, requires_grad=x.requires_grad),
+                dtilde1,
+            ],
+            axis=0,
+        )
+
+    # dtilde[dtilde < torch.min(lambda_)] = torch.min(lambda_)
+    # dtilde, _ = torch.sort(dtilde, descending=False)
+    dtilde = ridge + dtilde
+    sigmatilde = u @ torch.diag(dtilde) @ u.T
+    return sigmatilde
+
+
+def analytical_shrinkage_prec_ewma_ridge_torch(X, alpha, ridge, assume_centered=False):
     # X of shape (n,p), n >= 12
     beta = alpha / (1 - torch.exp(-alpha))
     n, p = X.shape
