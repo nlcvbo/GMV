@@ -4,6 +4,7 @@ import time
 import numpy as np
 import seaborn as sns
 import torch
+from scipy import stats
 from ANS_ewma import (
     analytical_shrinkage_ewma_ridge_torch,
     analytical_shrinkage_ewma_torch,
@@ -32,7 +33,7 @@ from weighted_LWO_estimator import wLWO_estimator_torch, wLWO_estimator_torch2
 
 sys.path.insert(0, "./WeSpeR/code/WeSpeR_LD")
 import matplotlib.pyplot as plt
-from dataloader import close_SP500, get_domain_list
+from dataloader import close_var_SP500, get_domain_list
 
 # from WeSpeR_LD import WeSpeR_LD
 from markowitz import GMV_P_torch, GMV_torch
@@ -41,6 +42,147 @@ from WeSpeR.code.WeSpeR_LD import WeSpeR_LD
 
 
 class EWMA_model(torch.nn.Module):
+    def __init__(self, a=1.0, lag=24, estimator="S"):
+        super().__init__()
+        self.a = torch.nn.Parameter(a * torch.ones(1).type(torch.float64))
+        self.lag = lag
+        self.estimator = estimator
+
+    def forward(self, Y):
+        n, p = Y.shape
+        res_s = torch.zeros(Y.shape[0] // 20 - self.lag, dtype=Y.dtype)
+        res_e = torch.zeros(Y.shape[0] // 20 - self.lag, dtype=Y.dtype)
+        for i in range(self.lag, Y.shape[0] // 20):
+            Y_train = Y[max(0, (i - self.lag) * 20) : i * 20]
+            Y_test = Y[i * 20 : (i + 1) * 20]
+
+            alpha = -torch.log(self.a) * Y_train.shape[0]
+            alpha / (1 - torch.exp(-alpha))
+            w = (
+                self.a
+                ** torch.fliplr(
+                    torch.ones(Y_train.shape[0]).cumsum(axis=0)[None, :] - 1
+                )[0, :]
+            )
+            w = w / w.sum(axis=0) * Y_train.shape[0]
+            wsq = torch.sqrt(w)
+
+            Y_train_ewma_mean = (w[:, None] * Y_train).sum(axis=0)[None, :] / w.sum(
+                axis=0
+            )
+            Y_train_ewma = Y_train - Y_train_ewma_mean
+
+            P, Sigma = None, None
+            if self.estimator == "S":
+                Sigma = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+            if self.estimator == "Var":
+                S_ewma = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+                Sigma = S_ewma * torch.eye(p)
+            if self.estimator == "LWO":
+                Sigma = wLWO_estimator_torch(
+                    Y_train, w / Y_train.shape[0], assume_centered=False
+                )
+            if self.estimator == "ANS":
+                try:
+                    P = analytical_shrinkage_prec_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = analytical_shrinkage_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "GIS":
+                try:
+                    P = GIS_ewma_prec_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = GIS_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "QIS":
+                try:
+                    P = QIS_ewma_prec_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = QIS_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "LIS":
+                try:
+                    P = LIS_ewma_prec_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = LIS_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "WeSpeR":
+                S = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+                lambda_, U = torch.linalg.eigh(S)
+                est = WeSpeR_LD(bias=True, assume_centered=True)
+                est = est.fit_torch(
+                    Y_train_ewma.detach(),
+                    w.detach(),
+                    y=None,
+                    tau_init=None,
+                    method="Adam",
+                    n_epochs=30,
+                    b=1,
+                    assume_centered=True,
+                    lr=5e-2,
+                    momentum=0.0,
+                    verbose=True,
+                )
+                # P = est.get_precision(d=None, wd=None,weights='ewma', w_args=[alpha])
+                t_lambda = nl_prec_shrinkage(
+                    lambda_.detach(),
+                    est.tau_fit_.detach(),
+                    torch.ones(est.tau_fit_.shape[0]) / est.tau_fit_.shape[0],
+                    None,
+                    None,
+                    c=est.c,
+                    weights="ewma",
+                    w_args=[alpha.detach()],
+                    method="root",
+                    verbose=False,
+                ).real.to(torch.float64)
+                P = U @ torch.diag(t_lambda) @ U.T
+
+            if P is None:
+                P = torch.linalg.pinv(Sigma)
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p) / p)
+            else:
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p) / p)
+            res_s[i - self.lag] = s
+            res_e[i - self.lag] = e
+
+        vol = torch.sqrt(res_s.mean(axis=0) * 252)
+        mu = res_e.mean(axis=0) / 20 * 252
+        sharpe = mu / vol
+        return vol, mu, sharpe
+
+    def get_a(self):
+        return self.a
+
+
+class EWMA_q_model(torch.nn.Module):
     def __init__(self, a=1.0, q=0.05, lag=24, estimator="S"):
         super().__init__()
         self.a = torch.nn.Parameter(a * torch.ones(1).type(torch.float64))
@@ -443,10 +585,164 @@ class EWMA_ridge_model(torch.nn.Module):
         return torch.exp(self.logridge)
 
 
-def minimization(
+class EWMA_volume_model(torch.nn.Module):
+    def __init__(self, a=1.0, sh=3.0, lag=24, estimator="S"):
+        super().__init__()
+        self.a = torch.nn.Parameter(a * torch.ones(1).type(torch.float64))
+        self.logsh = torch.nn.Parameter(
+            torch.log(sh * torch.ones(1).type(torch.float64))
+        )
+        self.lag = lag
+        self.estimator = estimator
+
+    def forward(self, Y, V):
+        n, p = Y.shape
+        res_s = torch.zeros(Y.shape[0] // 20 - self.lag, dtype=Y.dtype)
+        res_e = torch.zeros(Y.shape[0] // 20 - self.lag, dtype=Y.dtype)
+        for i in range(self.lag, Y.shape[0] // 20):
+            Y_train = Y[max(0, (i - self.lag) * 20) : i * 20]
+            V_train = V[max(0, (i - self.lag) * 20) : i * 20]
+            # vol_norm = torch.sqrt(V_train)/torch.sqrt(V_train).mean(axis=0)[None,:]
+            # vol_norm[vol_norm == 0.] = 1.
+            # Y_train = Y_train/vol_norm
+            Y_test = Y[i * 20 : (i + 1) * 20]
+
+            alpha = -torch.log(self.a) * Y_train.shape[0]
+            alpha / (1 - torch.exp(-alpha))
+            w = (
+                self.a
+                ** torch.fliplr(
+                    torch.ones(Y_train.shape[0]).cumsum(axis=0)[None, :] - 1
+                )[0, :]
+            )
+            wV = (V_train.mean(axis=1) - V_train.mean(axis=[0, 1])) / torch.exp(
+                self.logsh
+            ) + V_train.mean(axis=[0, 1])
+            wX = w / w.sum(axis=0) * Y_train.shape[0]
+            w = w * wV
+            w = w / w.sum(axis=0) * Y_train.shape[0]
+            wsq = torch.sqrt(w)
+
+            Y_train_ewma_mean = (w[:, None] * Y_train).sum(axis=0)[None, :] / w.sum(
+                axis=0
+            )
+            Y_train_ewma = Y_train - Y_train_ewma_mean
+
+            P, Sigma = None, None
+            if self.estimator == "S":
+                Sigma = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+            if self.estimator == "Var":
+                S_ewma = (
+                    Y_train_ewma.T
+                    @ (w[:, None] * Y_train_ewma)
+                    / Y_train_ewma.shape[0]
+                    / (1 - (w**2 / Y_train_ewma.shape[0] ** 2).sum(axis=0))
+                )
+                Sigma = S_ewma * torch.eye(p)
+            if self.estimator == "LWO":
+                Sigma = wLWO_estimator_torch2(
+                    Y_train,
+                    wX / Y_train.shape[0],
+                    w / Y_train.shape[0],
+                    assume_centered=False,
+                )
+            if self.estimator == "ANS":
+                try:
+                    P = analytical_shrinkage_prec_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = analytical_shrinkage_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "GIS":
+                try:
+                    P = GIS_ewma_prec_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = GIS_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "QIS":
+                try:
+                    P = QIS_ewma_prec_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = QIS_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+            if self.estimator == "LIS":
+                try:
+                    P = LIS_ewma_prec_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+                except ValueError:
+                    Sigma = LIS_ewma_torch(
+                        wsq[:, None] * Y_train_ewma, alpha, assume_centered=True
+                    )
+
+            if P is None:
+                P = torch.linalg.pinv(Sigma)
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p) / p)
+            else:
+                e, s, IC = GMV_P_torch(Y_test, P, wb=torch.ones(p) / p)
+            res_s[i - self.lag] = s
+            res_e[i - self.lag] = e
+
+        vol = torch.sqrt(res_s.mean(axis=0) * 252)
+        mu = res_e.mean(axis=0) / 20 * 252
+        sharpe = mu / vol
+        return vol, mu, sharpe
+
+    def get_a(self):
+        return self.a
+
+    def get_sh(self):
+        return torch.exp(self.logsh)
+
+
+def minimization(Y, a=1.0, lag=24, n_epochs=10, lr=1e-2, estimator="S", verbose=True):
+    model = EWMA_model(a=a, lag=lag, estimator=estimator)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    running_loss = []
+    best_loss = np.inf
+    best_a = a * torch.ones(1).type(torch.float64)
+
+    model.train(True)
+    for i in range(n_epochs):
+        optimizer.zero_grad()
+        vol, mu, sharpe = model(Y)
+        loss = vol
+        loss.backward()
+        optimizer.step()
+
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_a = model.get_a().detach()
+
+        running_loss += [loss.item()]
+
+        if verbose:
+            if n_epochs <= 10 or i % (n_epochs // 10) == 0:
+                print("Loss epoch", i, ":", loss.item())
+    if verbose:
+        print("Final loss:", best_loss)
+
+    return model, best_a, np.array(running_loss)
+
+
+def minimization_q(
     Y, a=1.0, q=0.05, lag=24, n_epochs=10, lr=1e-2, estimator="S", verbose=True
 ):
-    model = EWMA_model(a=a, q=q, lag=lag, estimator=estimator)
+    model = EWMA_q_model(a=a, q=q, lag=lag, estimator=estimator)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     running_loss = []
@@ -546,6 +842,41 @@ def minimization_ridge(
         print("Final loss:", best_loss)
 
     return model, best_a, best_ridge, np.array(running_loss)
+
+
+def minimization_volume(
+    Y, V, a=1.0, sh=3.0, lag=24, n_epochs=10, lr=1e-2, estimator="S", verbose=True
+):
+    model = EWMA_volume_model(a=a, sh=sh, lag=lag, estimator=estimator)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    running_loss = []
+    best_loss = np.inf
+    best_a = a * torch.ones(1).type(torch.float64)
+    best_sh = sh * torch.ones(1).type(torch.float64)
+
+    model.train(True)
+    for i in range(n_epochs):
+        optimizer.zero_grad()
+        vol, mu, sharpe = model(Y, V)
+        loss = vol
+        loss.backward()
+        optimizer.step()
+
+        if loss.item() < best_loss:
+            best_loss = loss.item()
+            best_a = model.get_a().detach()
+            best_sh = model.get_sh().detach()
+
+        running_loss += [loss.item()]
+
+        if verbose:
+            if n_epochs <= 10 or i % (n_epochs // 10) == 0:
+                print("Loss epoch", i, ":", loss.item())
+    if verbose:
+        print("Final loss:", best_loss)
+
+    return model, best_a, best_sh, np.array(running_loss)
 
 
 def plot_vol(Y, a_tab, lag=24, estimator_list=["LWO"]):
@@ -873,18 +1204,39 @@ def plot_var(Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=None, la
     plt.show(block=True)
 
 
+def plot_volume(V):
+    vol_mean = V.mean(axis=1)
+    plt.figure()
+    plt.hist(vol_mean, density=True, bins=150, label="SP mean daily volume")
+    x = np.linspace(np.min(vol_mean), np.max(vol_mean), 1000)
+    shape, loc, scale = stats.lognorm.fit(vol_mean, floc=0)
+    plt.plot(x, stats.lognorm.pdf(x, shape, loc, scale), label="log-normal")
+    shape, loc, scale = stats.lomax.fit(vol_mean, floc=0)
+    plt.plot(x, stats.lomax.pdf(x, shape, loc, scale), label="Pareto")
+    shape, loc, scale = stats.fisk.fit(vol_mean, floc=0)
+    plt.plot(x, stats.fisk.pdf(x, shape, loc, scale), label="log-logistic")
+    shape, loc, scale = stats.gamma.fit(vol_mean, floc=0)
+    plt.plot(x, stats.gamma.pdf(x, shape, loc, scale), label="Gamma")
+    shape, loc, scale = stats.weibull_min.fit(vol_mean, floc=0)
+    plt.plot(x, stats.weibull_min.pdf(x, shape, loc, scale), label="Weibull")
+    plt.xlabel("volume")
+    plt.ylabel("density")
+    plt.title("Volume distrib")
+    plt.legend()
+    plt.show(block=True)
+
+
 if __name__ == "__main__":
     import matplotlib
 
     try:
-        # matplotlib.use("tkagg")
         matplotlib.use("tkagg")
         matplotlib.pyplot.ion()
     except Exception:
         pass
 
     try:
-        Y.shape
+        Y.shape, V.shape
     except NameError:
         beg_time = time.time()
         ticker_list = [
@@ -1216,31 +1568,365 @@ if __name__ == "__main__":
             "ZBRA",
             "ZION",
         ]
+        ticker_list = [
+            "AAPL",
+            "ABT",
+            "ADBE",
+            "ADI",
+            "ADM",
+            "ADP",
+            "ADSK",
+            "AEP",
+            "AES",
+            "AFL",
+            "AIG",
+            "AJG",
+            "ALB",
+            "ALK",
+            "ALL",
+            "AMAT",
+            "AMD",
+            "AME",
+            "AMGN",
+            "AON",
+            "AOS",
+            "APA",
+            "APD",
+            "APH",
+            "ATO",
+            "AVB",
+            "AVY",
+            "AXP",
+            "AZO",
+            "BAC",
+            "BALL",
+            "BAX",
+            "BA",
+            "BBWI",
+            "BBY",
+            "BDX",
+            "BEN",
+            "BIIB",
+            "BIO",
+            "BKR",
+            "BK",
+            "BMY",
+            "BRO",
+            "BSX",
+            "BWA",
+            "CAG",
+            "CAH",
+            "CAT",
+            "CB",
+            "CCL",
+            "CDNS",
+            "CHD",
+            "CINF",
+            "CI",
+            "CLX",
+            "CL",
+            "CMA",
+            "CMCSA",
+            "CMI",
+            "CMS",
+            "CNP",
+            "COF",
+            "COO",
+            "COP",
+            "COST",
+            "CPB",
+            "CPRT",
+            "CPT",
+            "CSCO",
+            "CSX",
+            "CTAS",
+            "CTRA",
+            "CVS",
+            "CVX",
+            "C",
+            "DD",
+            "DE",
+            "DHI",
+            "DHR",
+            "DIS",
+            "DLTR",
+            "DOV",
+            "DRI",
+            "DTE",
+            "DUK",
+            "DVA",
+            "DVN",
+            "DXC",
+            "D",
+            "EA",
+            "ECL",
+            "ED",
+            "EFX",
+            "EIX",
+            "EL",
+            "EMN",
+            "EMR",
+            "EOG",
+            "EQR",
+            "ESS",
+            "ES",
+            "ETN",
+            "ETR",
+            "EVRG",
+            "EXC",
+            "EXPD",
+            "FAST",
+            "FCX",
+            "FDX",
+            "FITB",
+            "FMC",
+            "FRT",
+            "F",
+            "GD",
+            "GE",
+            "GILD",
+            "GIS",
+            "GLW",
+            "GL",
+            "GPC",
+            "GWW",
+            "HAL",
+            "HAS",
+            "HBAN",
+            "HD",
+            "HES",
+            "HIG",
+            "HOLX",
+            "HON",
+            "HPQ",
+            "HRL",
+            "HSIC",
+            "HST",
+            "HSY",
+            "HUM",
+            "IBM",
+            "IDXX",
+            "IEX",
+            "IFF",
+            "INCY",
+            "INTC",
+            "INTU",
+            "IPG",
+            "IP",
+            "ITW",
+            "IT",
+            "IVZ",
+            "JBHT",
+            "JCI",
+            "JKHY",
+            "JNJ",
+            "JPM",
+            "J",
+            "KEY",
+            "KIM",
+            "KLAC",
+            "KMB",
+            "KO",
+            "KR",
+            "K",
+            "LEN",
+            "LHX",
+            "LH",
+            "LIN",
+            "LLY",
+            "LMT",
+            "LNC",
+            "LNT",
+            "LOW",
+            "LRCX",
+            "LUMN",
+            "LUV",
+            "L",
+            "MAA",
+            "MAS",
+            "MCD",
+            "MCHP",
+            "MCK",
+            "MCO",
+            "MDT",
+            "MGM",
+            "MHK",
+            "MKC",
+            "MLM",
+            "MMC",
+            "MMM",
+            "MNST",
+            "MOS",
+            "MO",
+            "MRK",
+            "MSFT",
+            "MSI",
+            "MS",
+            "MTB",
+            "MTCH",
+            "MU",
+            "NDSN",
+            "NEE",
+            "NEM",
+            "NI",
+            "NKE",
+            "NOC",
+            "NSC",
+            "NTAP",
+            "NTRS",
+            "NUE",
+            "NVR",
+            "NWL",
+            "ODFL",
+            "OKE",
+            "OMC",
+            "ORCL",
+            "ORLY",
+            "OXY",
+            "O",
+            "PAYX",
+            "PCAR",
+            "PEG",
+            "PENN",
+            "PEP",
+            "PFE",
+            "PGR",
+            "PG",
+            "PHM",
+            "PH",
+            "PNC",
+            "PNR",
+            "PNW",
+            "POOL",
+            "PPG",
+            "PPL",
+            "PSA",
+            "PTC",
+            "PVH",
+            "QCOM",
+            "RCL",
+            "REGN",
+            "REG",
+            "RF",
+            "RHI",
+            "RJF",
+            "RMD",
+            "ROK",
+            "ROL",
+            "ROP",
+            "ROST",
+            "RTX",
+            "SBUX",
+            "SCHW",
+            "SEE",
+            "SHW",
+            "SJM",
+            "SLB",
+            "SNA",
+            "SNPS",
+            "SO",
+            "SPGI",
+            "SPG",
+            "STE",
+            "STT",
+            "STZ",
+            "SWKS",
+            "SWK",
+            "SYK",
+            "SYY",
+            "TAP",
+            "TECH",
+            "TER",
+            "TFC",
+            "TFX",
+            "TGT",
+            "TJX",
+            "TMO",
+            "TRMB",
+            "TROW",
+            "TRV",
+            "TSCO",
+            "TSN",
+            "TT",
+            "TXN",
+            "TXT",
+            "TYL",
+            "T",
+            "UDR",
+            "UHS",
+            "UNH",
+            "UNP",
+            "USB",
+            "VFC",
+            "VLO",
+            "VMC",
+            "VNO",
+            "VRTX",
+            "VTRS",
+            "VZ",
+            "WAB",
+            "WAT",
+            "WBA",
+            "WDC",
+            "WEC",
+            "WELL",
+            "WFC",
+            "WHR",
+            "WMB",
+            "WMT",
+            "WM",
+            "WRB",
+            "WST",
+            "WY",
+            "XEL",
+            "XOM",
+            "XRAY",
+            "ZBRA",
+            "ZION",
+        ]
         domain_list, domains = get_domain_list(ticker_list)
         domain_list = np.array(domain_list)
         p = len(ticker_list)
         X = np.zeros((0, len(ticker_list)))
+        V = np.zeros((0, len(ticker_list)))
         for year in range(2010, 2022):
-            X = np.concatenate(
-                [X, close_SP500(year, ticker_list=ticker_list, verbose=True)], axis=0
-            )
+            X_t, V_t = close_var_SP500(year, ticker_list=ticker_list, verbose=True)
+            # X_t = close_SP500(year, ticker_list=ticker_list, verbose=True)
+            X = np.concatenate([X, X_t], axis=0)
+            V = np.concatenate([V, V_t], axis=0)
+        # V = V*X #dollar volume
         Y = np.log(X[1:]) - np.log(X[:-1])
         Y = torch.from_numpy(Y)
+        V = torch.from_numpy(V[1:])
         end_time = time.time()
         print("Data loading:", end_time - beg_time)
 
     beg_time = time.time()
-    # model, best_a, best_q, loss = minimization(
+    # model, best_a, best_q, loss = minimization_q(
     #     Y, a=0.99, q=0.05, lag=36, n_epochs=30, lr=2e-3, estimator="GIS", verbose=True
     # )
     # model, best_a, best_b, loss = minimization2(Y, a = 0.99, b = 0.99, \
     # lag = 48, n_epochs = 30, lr = 1e-3, estimator = 'LWO', verbose = True)
+    # model, best_a, loss = minimization(Y, a = 0.9591, \
+    # lag = 24, n_epochs = 20, lr = 3e-3, estimator = 'LWO', verbose = True)
+    model, best_a, best_sh, loss = minimization_volume(
+        Y,
+        V,
+        a=0.9598,
+        sh=4.6,
+        lag=24,
+        n_epochs=50,
+        lr=3e-3,
+        estimator="LWO",
+        verbose=True,
+    )
     # model, best_a, best_ridge, loss = minimization_ridge(Y, a = 0.99, \
-    # ridge = 1.6012e-5, lag = 24, n_epochs = 10, lr = 1e-3, \
-    # estimator = 'ANS', verbose = True)
-    # end_time = time.time()
-    # print("Minimization:", end_time - beg_time)
-    # print("Best a =", best_a)
+    # ridge = 1.6012e-5, lag = 18, n_epochs = 10, lr = 1e-3, \
+    # estimator = 'LWO', verbose = True)
+    end_time = time.time()
+    print("Minimization:", end_time - beg_time)
+    print("Best a =", best_a)
+    print("Best sh =", best_sh)
     # print("Best ridge =", best_ridge)
     # print("Best q =", best_q)
     # print("Best b =", best_b)
@@ -1252,6 +1938,12 @@ if __name__ == "__main__":
     # plot_spectrum(Y, a = 0.99*torch.ones(1, dtype=torch.float64), lag=48, \
     # estimator = 'WeSpeR')
     ridge_dict = {"S": 1.6648e-5, "LWO": 1.7472e-5, "ANS": 1.6012e-5, "QIS": 1.6012e-5}
-    plot_var(
-        Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=ridge_dict, lag=24
-    )
+    # plot_var(
+    #     Y, a=0.99 * torch.ones(1, dtype=torch.float64), ridge_dict=ridge_dict, lag=18
+    # )
+
+    # for i in range(V.shape[0]//500):
+    #     plot_volume(V[i*500:(i+1)*500])
+
+    # Clipping to quantiles does not seem to improve the forecast
+    # Normalizing by the square root of the volume neither
