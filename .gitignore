@@ -1,5 +1,5 @@
 .venv/
-.DS_store/
+.DS_Store/
 *.pyc
 uv.lock
 .python-version
